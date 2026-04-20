@@ -1,11 +1,15 @@
 import logging, os, re, requests as http
-from flask import Flask, request, jsonify
+from flask import Flask, request
 import sheets, ai
 from rules import (
-    is_greeting_only, is_registration_form,
-    needs_human, determine_eligible_levels, map_interest_to_subfield,
+    is_greeting_only, is_registration_form, needs_human,
+    is_register_intent, is_human_request,
+    determine_eligible_levels, map_interest_to_subfield, count_a_grades,
 )
-from templates import TEMPLATE_1, TEMPLATE_2, HUMAN_MODE_MSG, OVERSEAS_MSG, format_courses
+from templates import (
+    TEMPLATE_1, TEMPLATE_2, HUMAN_MODE_MSG, OVERSEAS_MSG,
+    PATHWAY_QUESTION, DIRECTION_GUIDE, REGISTRATION_FORM, format_courses,
+)
 from config import TELEGRAM_TOKEN, STAFF_CHAT_ID
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -15,7 +19,13 @@ app = Flask(__name__)
 TG_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 TG_FILE = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}"
 
-COURSE_RE = re.compile(r"推荐|课程|学校|读什么|什么课|哪个学校|suitable|recommend", re.I)
+COURSE_RE = re.compile(
+    r"推荐|课程|学校|读什么|什么课|哪个学校|suitable|recommend|什么好|读哪|哪里读|帮我找",
+    re.I,
+)
+# Matches simple pathway answers: "1", "2", "foundation", "diploma", etc.
+PATHWAY_1_RE = re.compile(r"^[\s\W]*(1|foundation|基础|预科)[\s\W!。！～~]*$", re.I)
+PATHWAY_2_RE = re.compile(r"^[\s\W]*(2|diploma|文凭)[\s\W!。！～~]*$", re.I)
 
 
 def send(chat_id, text):
@@ -53,18 +63,36 @@ def notify_staff(student, reason):
         return
     send(STAFF_CHAT_ID,
          f"*需要人工跟进*\n原因: {reason}\n"
-         f"姓名: {student.get('姓名','?')}\n"
-         f"电话: {student.get('电话号码','-')}\n"
-         f"Chat ID: {student.get('chat_id','-')}")
+         f"姓名: {student.get('姓名', '?')}\n"
+         f"电话: {student.get('电话号码', '-')}\n"
+         f"Chat ID: {student.get('chat_id', '-')}")
 
 
 def send_recommendation(chat_id, student):
     grade_text = student.get("成绩单", "")
     interest = student.get("想就读专业", "")
     eligible_levels, pathway_summary = determine_eligible_levels(grade_text)
+
+    # SPM: ask Foundation vs Diploma preference if both eligible and not yet chosen
+    if ("FOUNDATION" in eligible_levels and "DIPLOMA" in eligible_levels
+            and not student.get("pathway_pref")):
+        send(chat_id, PATHWAY_QUESTION)
+        return
+
+    # Apply saved pathway preference to filter levels
+    pathway_pref = student.get("pathway_pref", "")
+    if pathway_pref and pathway_pref in eligible_levels:
+        eligible_levels = [pathway_pref]
+
+    # No major specified → guide student to find direction
+    if not interest:
+        send(chat_id, DIRECTION_GUIDE)
+        return
+
     tab, allowed_sub = map_interest_to_subfield(interest)
-    courses = sheets.query_courses(allowed_sub, eligible_levels, tab)
-    if not courses and not allowed_sub:
+
+    # Unknown field mapping → ask direction
+    if not allowed_sub:
         send(chat_id,
              "根据你的成绩，你符合：*" + pathway_summary + "*\n\n"
              "请问你有兴趣读哪个方向？\n"
@@ -75,9 +103,18 @@ def send_recommendation(chat_id, student):
              "🎨 设计\n"
              "📖 其他")
         return
+
+    courses = sheets.query_courses(allowed_sub, eligible_levels, tab)
     if not courses:
         courses = sheets.query_courses([], eligible_levels, tab)
-    send(chat_id, format_courses(courses, pathway_summary))
+
+    if not courses:
+        send(chat_id, "抱歉，暂时找不到符合条件的课程，我们的顾问会为你提供更多选择！")
+        notify_staff({**student, "chat_id": chat_id}, "找不到符合条件的课程")
+        return
+
+    a_count = count_a_grades(grade_text)
+    send(chat_id, format_courses(courses, pathway_summary, a_count))
 
 
 def handle_message(message):
@@ -92,28 +129,35 @@ def handle_message(message):
     has_profile = bool(student.get("姓名"))
     has_grades = bool(student.get("成绩单"))
 
-    # Human mode
+    # ── 1. Human mode: all messages get the same reply ──────────────────────────
     if student.get("need_human") == "YES":
         send(chat_id, HUMAN_MODE_MSG)
         return
 
-    # Registration form
+    # ── 2. Registration form submitted ──────────────────────────────────────────
     if text and is_registration_form(text):
         reg_data = ai.extract_registration(text)
         sheets.save_registration(chat_id, reg_data)
         sheets.update_student(chat_id, {"source_text": text[:500]})
         send(chat_id, "✅ 报名资料已收到！我们的顾问会尽快联系你。")
-        notify_staff({**student, "chat_id": chat_id}, "收到报名表格")
+        notify_staff({**student, "chat_id": chat_id}, "收到完整报名表格 — 准备跟进")
         return
 
-    # Overseas / APEL
-    if text and needs_human(text) and not has_profile:
+    # ── 3. Overseas / APEL (before profile exists) ──────────────────────────────
+    if text and not has_profile and needs_human(text):
         sheets.set_human_mode(chat_id, True)
         send(chat_id, OVERSEAS_MSG)
-        notify_staff({**student, "chat_id": chat_id}, f"海外询问：{text[:80]}")
+        notify_staff({**student, "chat_id": chat_id}, f"海外/APEL询问：{text[:80]}")
         return
 
-    # Grade image or PDF
+    # ── 4. Explicit request to speak with a human ────────────────────────────────
+    if text and is_human_request(text):
+        sheets.set_human_mode(chat_id, True)
+        send(chat_id, HUMAN_MODE_MSG)
+        notify_staff({**student, "chat_id": chat_id}, f"学生要求人工服务：{text[:80]}")
+        return
+
+    # ── 5. Grade image or PDF ────────────────────────────────────────────────────
     if has_media:
         send(chat_id, "⏳ 正在识别成绩单，请稍等...")
         analysis = handle_grade_media(message)
@@ -133,12 +177,43 @@ def handle_message(message):
     if not text:
         return
 
-    # Greeting or very short message
+    # ── 6. Greeting / very short message ────────────────────────────────────────
     if is_greeting_only(text) or (not has_profile and not has_grades and len(text) < 8):
         send(chat_id, TEMPLATE_1)
         return
 
-    # Try AI profile extraction from any text
+    # ── 7. Pathway preference answer (SPM: Foundation vs Diploma) ───────────────
+    if has_grades and not student.get("pathway_pref"):
+        eligible_levels, _ = determine_eligible_levels(student.get("成绩单", ""))
+        if "FOUNDATION" in eligible_levels and "DIPLOMA" in eligible_levels:
+            if PATHWAY_1_RE.match(text):
+                sheets.update_student(chat_id, {"pathway_pref": "FOUNDATION"})
+                student["pathway_pref"] = "FOUNDATION"
+                send(chat_id, "✅ 好的！为你推荐 Foundation 课程～")
+                if has_profile:
+                    send_recommendation(chat_id, student)
+                else:
+                    send(chat_id, TEMPLATE_1)
+                return
+            elif PATHWAY_2_RE.match(text):
+                sheets.update_student(chat_id, {"pathway_pref": "DIPLOMA"})
+                student["pathway_pref"] = "DIPLOMA"
+                send(chat_id, "✅ 好的！Diploma 可以 credits transfer 升入 Degree 第二年 😊")
+                if has_profile:
+                    send_recommendation(chat_id, student)
+                else:
+                    send(chat_id, TEMPLATE_1)
+                return
+
+    # ── 8. Register intent ───────────────────────────────────────────────────────
+    if is_register_intent(text):
+        school = student.get("想就读院校", "")
+        send(chat_id, REGISTRATION_FORM)
+        notify_staff({**student, "chat_id": chat_id},
+                     f"学生有意向报名{' | ' + school if school else ''}")
+        return
+
+    # ── 9. AI profile extraction from any text ───────────────────────────────────
     profile_data = ai.extract_profile(text)
     profile_data = {k: v for k, v in profile_data.items() if v and str(v).strip()}
 
@@ -155,7 +230,7 @@ def handle_message(message):
             send(chat_id, TEMPLATE_1)
         return
 
-    # Route by state
+    # ── 10. Route by state ───────────────────────────────────────────────────────
     if not has_profile:
         send(chat_id, TEMPLATE_1)
         return
@@ -163,9 +238,9 @@ def handle_message(message):
         send(chat_id, TEMPLATE_2)
         return
 
-    # Has profile + grades: answer or recommend
+    # ── 11. Has profile + grades: answer or recommend ───────────────────────────
     context = (f"姓名:{student.get('姓名')} 学历:{student.get('学历')} "
-               f"专业:{student.get('想就读专业')} 成绩:{student.get('成绩单','')[:150]}")
+               f"专业:{student.get('想就读专业')} 成绩:{student.get('成绩单', '')[:150]}")
     if COURSE_RE.search(text):
         send_recommendation(chat_id, student)
     else:
