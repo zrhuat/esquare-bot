@@ -1,12 +1,11 @@
 import base64, json, logging
-import PIL.Image
-import io
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from config import GEMINI_API_KEY
 
 logger = logging.getLogger(__name__)
-genai.configure(api_key=GEMINI_API_KEY)
-_model = genai.GenerativeModel("gemini-1.5-flash")
+_client = genai.Client(api_key=GEMINI_API_KEY)
+MODEL = "gemini-2.0-flash"
 
 # ── Grade analysis ─────────────────────────────────────────────────────────────
 
@@ -25,8 +24,13 @@ Be concise and accurate. Do not add commentary."""
 
 def analyze_grade_image(image_bytes: bytes, mime: str = "image/jpeg") -> str:
     try:
-        img = PIL.Image.open(io.BytesIO(image_bytes))
-        resp = _model.generate_content([GRADE_SYSTEM, img, "Analyze this exam result slip."])
+        resp = _client.models.generate_content(
+            model=MODEL,
+            contents=[
+                types.Part.from_bytes(data=image_bytes, mime_type=mime),
+                GRADE_SYSTEM + "\nAnalyze this exam result slip.",
+            ],
+        )
         return resp.text.strip()
     except Exception as e:
         logger.error("analyze_grade_image error: %s", e)
@@ -35,12 +39,13 @@ def analyze_grade_image(image_bytes: bytes, mime: str = "image/jpeg") -> str:
 
 def analyze_grade_pdf(pdf_bytes: bytes) -> str:
     try:
-        b64 = base64.b64encode(pdf_bytes).decode()
-        resp = _model.generate_content([
-            GRADE_SYSTEM,
-            {"mime_type": "application/pdf", "data": b64},
-            "Analyze this exam result slip.",
-        ])
+        resp = _client.models.generate_content(
+            model=MODEL,
+            contents=[
+                types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf"),
+                GRADE_SYSTEM + "\nAnalyze this exam result slip.",
+            ],
+        )
         return resp.text.strip()
     except Exception as e:
         logger.error("analyze_grade_pdf error: %s", e)
@@ -74,9 +79,10 @@ Output JSON only, no markdown, no explanation."""
 
 def extract_profile(text: str) -> dict:
     try:
-        resp = _model.generate_content(
-            PROFILE_SYSTEM + "\n\nText: " + text,
-            generation_config=genai.GenerationConfig(response_mime_type="application/json"),
+        resp = _client.models.generate_content(
+            model=MODEL,
+            config=types.GenerateContentConfig(response_mime_type="application/json"),
+            contents=PROFILE_SYSTEM + "\n\nText: " + text,
         )
         return json.loads(resp.text.strip())
     except Exception as e:
@@ -111,9 +117,10 @@ Output JSON only."""
 
 def extract_registration(text: str) -> dict:
     try:
-        resp = _model.generate_content(
-            REG_SYSTEM + "\n\nText: " + text,
-            generation_config=genai.GenerationConfig(response_mime_type="application/json"),
+        resp = _client.models.generate_content(
+            model=MODEL,
+            config=types.GenerateContentConfig(response_mime_type="application/json"),
+            contents=REG_SYSTEM + "\n\nText: " + text,
         )
         return json.loads(resp.text.strip())
     except Exception as e:
@@ -131,8 +138,9 @@ Be concise, warm, and helpful. Max 3 sentences unless explaining course details.
 
 def answer_question(student_context: str, question: str) -> str:
     try:
-        resp = _model.generate_content(
-            CHAT_SYSTEM + f"\n\nStudent profile:\n{student_context}\n\nQuestion: {question}"
+        resp = _client.models.generate_content(
+            model=MODEL,
+            contents=CHAT_SYSTEM + f"\n\nStudent profile:\n{student_context}\n\nQuestion: {question}",
         )
         return resp.text.strip()
     except Exception as e:
