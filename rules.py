@@ -78,19 +78,37 @@ def _spm_credits(text: str) -> int:
     return len(re.findall(r"\(CREDIT\)", text, re.I))
 
 
+def _spm_pass(text: str, subject_pattern: str) -> bool:
+    """BM and Sejarah only need a pass (E and above, G = fail) — not necessarily credit."""
+    # Format 1: original slip "(CREDIT)" or "(PASS)" notation
+    if re.search(subject_pattern + r".*\((CREDIT|PASS)\)|\((CREDIT|PASS)\).*" + subject_pattern, text, re.I):
+        return True
+    # Format 2: AI output "Subject: A/B/C/D/E/Credit/Pass" (anything except Fail/G)
+    if re.search(subject_pattern + r"[^:\n]*:\s*(Credit|Pass|A[+\-]?|B[+\-]?|C[+\-]?|D[+\-]?|E[+\-]?)\b", text, re.I):
+        return True
+    return False
+
+
 def _spm_has(text: str, subject_pattern: str) -> bool:
-    return bool(re.search(subject_pattern + r".*\(CREDIT\)|\(CREDIT\).*" + subject_pattern, text, re.I))
+    """Returns True if subject has credit grade (C and above)."""
+    if re.search(subject_pattern + r".*\(CREDIT\)|\(CREDIT\).*" + subject_pattern, text, re.I):
+        return True
+    # Format 2: AI output "Subject: A/B/C/Credit"
+    if re.search(subject_pattern + r"[^:\n]*:\s*(Credit|A[+\-]?|B[+\-]?|C[+\-]?)\b", text, re.I):
+        return True
+    return False
 
 
 def _spm_pathway(text: str) -> tuple:
     credits = _spm_credits(text)
-    has_bm = _spm_has(text, r"Bahasa Melayu|BM")
-    has_sej = _spm_has(text, r"Sejarah")
+    # BM + Sejarah: pass (E and above) is the hard requirement for all levels
+    has_bm = _spm_pass(text, r"Bahasa Melayu|BM")
+    has_sej = _spm_pass(text, r"Sejarah")
     has_math = _spm_has(text, r"Math|Matematik")
     has_eng = _spm_has(text, r"English|Bahasa Inggeris|BI")
 
     levels = []
-    if credits >= 1:
+    if credits >= 1 and has_bm and has_sej:
         levels.append("CERTIFICATE")
     if credits >= 3 and has_bm and has_sej:
         levels.append("DIPLOMA")

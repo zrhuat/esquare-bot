@@ -15,6 +15,12 @@ from config import TELEGRAM_TOKEN, STAFF_CHAT_ID
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
+def _t1(has_grades: bool) -> str:
+    """TEMPLATE_1 without the grade-request line if grades already received."""
+    if has_grades:
+        return TEMPLATE_1.replace("\n方便分享成绩给我们吗（图片/ PDF）", "")
+    return TEMPLATE_1
+
 app = Flask(__name__)
 TG_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 TG_FILE = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}"
@@ -159,6 +165,15 @@ def handle_message(message):
 
     # ── 5. Grade image or PDF ────────────────────────────────────────────────────
     if has_media:
+        # Extract profile from caption at the same time if present
+        if text and not has_profile:
+            profile_data = ai.extract_profile(text)
+            profile_data = {k: v for k, v in profile_data.items() if v and str(v).strip()}
+            if profile_data.get("姓名") or profile_data.get("电话号码"):
+                sheets.update_student(chat_id, {**profile_data, "source_text": text[:500]})
+                student.update(profile_data)
+                has_profile = bool(student.get("姓名"))
+
         send(chat_id, "⏳ 正在识别成绩单，请稍等...")
         analysis = handle_grade_media(message)
         if analysis:
@@ -169,7 +184,7 @@ def handle_message(message):
             if has_profile:
                 send_recommendation(chat_id, student)
             else:
-                send(chat_id, TEMPLATE_1)
+                send(chat_id, _t1(has_grades))
         else:
             send(chat_id, "抱歉，无法识别该文件。请发送清晰的图片或 PDF 📄")
         return
@@ -179,7 +194,7 @@ def handle_message(message):
 
     # ── 6. Greeting / very short message ────────────────────────────────────────
     if is_greeting_only(text) or (not has_profile and not has_grades and len(text) < 8):
-        send(chat_id, TEMPLATE_1)
+        send(chat_id, _t1(has_grades))
         return
 
     # ── 7. Pathway preference answer (SPM: Foundation vs Diploma) ───────────────
@@ -193,7 +208,7 @@ def handle_message(message):
                 if has_profile:
                     send_recommendation(chat_id, student)
                 else:
-                    send(chat_id, TEMPLATE_1)
+                    send(chat_id, _t1(has_grades))
                 return
             elif PATHWAY_2_RE.match(text):
                 sheets.update_student(chat_id, {"pathway_pref": "DIPLOMA"})
@@ -202,7 +217,7 @@ def handle_message(message):
                 if has_profile:
                     send_recommendation(chat_id, student)
                 else:
-                    send(chat_id, TEMPLATE_1)
+                    send(chat_id, _t1(has_grades))
                 return
 
     # ── 8. Register intent ───────────────────────────────────────────────────────
@@ -227,12 +242,12 @@ def handle_message(message):
         elif has_profile:
             send(chat_id, TEMPLATE_2)
         else:
-            send(chat_id, TEMPLATE_1)
+            send(chat_id, _t1(has_grades))
         return
 
     # ── 10. Route by state ───────────────────────────────────────────────────────
     if not has_profile:
-        send(chat_id, TEMPLATE_1)
+        send(chat_id, _t1(has_grades))
         return
     if not has_grades:
         send(chat_id, TEMPLATE_2)

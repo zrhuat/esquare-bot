@@ -3,7 +3,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 TELEGRAM_TOKEN   = os.environ["TELEGRAM_TOKEN"]
-OPENAI_API_KEY   = os.environ["OPENAI_API_KEY"]
+GEMINI_API_KEY   = os.environ["GEMINI_API_KEY"]
 STAFF_CHAT_ID    = os.environ.get("STAFF_CHAT_ID", "")
 WEBHOOK_URL      = os.environ.get("WEBHOOK_URL", "")   # e.g. https://yourapp.zeabur.app/webhook
 

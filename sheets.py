@@ -20,6 +20,9 @@ _course_cache: list[dict] = []
 _course_cache_at: float = 0
 CACHE_TTL = 300  # 5 minutes
 
+_student_cache: dict[str, tuple[dict, float]] = {}
+STUDENT_CACHE_TTL = 60  # 1 minute
+
 
 def _client() -> gspread.Client:
     global _gc
@@ -33,28 +36,34 @@ def _client() -> gspread.Client:
 # ── Student Tracking ──────────────────────────────────────────────────────────
 
 def get_student(chat_id: str) -> dict:
-    """Return student row from Student_Tracking, or empty dict if not found."""
+    """Return student row from Student_Tracking, with 1-min in-memory cache."""
+    global _student_cache
+    cached, cached_at = _student_cache.get(chat_id, ({}, 0.0))
+    if cached_at and time.time() - cached_at < STUDENT_CACHE_TTL:
+        return cached
     try:
         sh = _client().open_by_key(DB_SHEET_ID)
         ws = sh.worksheet("Student_Tracking")
         records = ws.get_all_records()
         for row in records:
             if str(row.get("chat_id", "")).strip() == chat_id:
+                _student_cache[chat_id] = (row, time.time())
                 return row
     except Exception as e:
         logger.error("get_student error: %s", e)
+    _student_cache[chat_id] = ({}, time.time())
     return {}
 
 
 def update_student(chat_id: str, data: dict) -> None:
     """Upsert a student row in Student_Tracking (match on chat_id)."""
+    global _student_cache
     try:
         sh = _client().open_by_key(DB_SHEET_ID)
         ws = sh.worksheet("Student_Tracking")
         headers = ws.row_values(1)
 
-        # Find existing row
-        col_a = ws.col_values(1)  # chat_id column
+        col_a = ws.col_values(1)
         try:
             row_idx = col_a.index(chat_id) + 1
         except ValueError:
@@ -63,18 +72,28 @@ def update_student(chat_id: str, data: dict) -> None:
         data = {**data, "chat_id": chat_id, "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 
         if row_idx:
-            # Update only non-empty fields
+            # Batch update all fields in one API call
+            updates = []
             for col_name, value in data.items():
                 if col_name in headers and value not in ("", None):
                     col_idx = headers.index(col_name) + 1
-                    ws.update_cell(row_idx, col_idx, str(value))
+                    updates.append({
+                        "range": gspread.utils.rowcol_to_a1(row_idx, col_idx),
+                        "values": [[str(value)]],
+                    })
+            if updates:
+                ws.batch_update(updates)
         else:
-            # Append new row
             row = [""] * len(headers)
             for col_name, value in data.items():
                 if col_name in headers:
                     row[headers.index(col_name)] = str(value) if value is not None else ""
             ws.append_row(row, value_input_option="USER_ENTERED")
+
+        # Update cache with new values
+        cached, _ = _student_cache.get(chat_id, ({}, 0.0))
+        merged = {**cached, **{k: v for k, v in data.items() if v not in ("", None)}}
+        _student_cache[chat_id] = (merged, time.time())
     except Exception as e:
         logger.error("update_student error: %s", e)
 
