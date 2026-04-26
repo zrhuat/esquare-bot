@@ -6,7 +6,7 @@ from config import GEMINI_API_KEY
 
 logger = logging.getLogger(__name__)
 genai.configure(api_key=GEMINI_API_KEY)
-_model = genai.GenerativeModel("gemini-2.0-flash")
+_model = genai.GenerativeModel("gemini-1.5-flash")
 
 # ── Grade analysis ─────────────────────────────────────────────────────────────
 
